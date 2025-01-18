@@ -3,7 +3,6 @@ from unet import Unet
 from dataset import RoadDataset
 
 import torch
-import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import torch.multiprocessing as mp
 from torch.utils.data.distributed import DistributedSampler
@@ -14,6 +13,12 @@ import os
 from tqdm import tqdm
 
 
+def set_random_seed(seed: int):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 def ddp_setup(rank, world_size):
     """
@@ -51,6 +56,7 @@ class Trainer:
         self.weights = torch.tensor([self.background_weight, self.road_weight]).to(self.gpu_id)
         self.loss_fn = torch.nn.CrossEntropyLoss(weight=self.weights)
         self.best_val_loss = float('inf')
+        
     def _run_epoch_train(self, epoch):
         batch_size = len(self.train_data)
         self.train_data.sampler.set_epoch(epoch)
@@ -121,6 +127,7 @@ class Trainer:
         ckp = self.model.module.state_dict()
         torch.save(ckp, PATH)
         print(f"Epoch {epoch} | Training checkpoint saved at {PATH}")
+
     def _save_best_model(self):
         checkpoint_dir = "checkpoints"
         os.makedirs(checkpoint_dir, exist_ok=True)
@@ -138,11 +145,10 @@ class Trainer:
                     self.best_val_loss = val_loss
                     self._save_best_model()
 
-                if epoch % self.save_every == 0:
+                if epoch+1 % self.save_every == 0:
                     self._save_checkpoint(epoch)
 
-def load_train_objs(checkpoint_path):
-    data_path='/ediss_data/ediss6/deepglobe-road-extraction-dataset'
+def load_train_objs(data_path, checkpoint_path=None):
     dataset_train = RoadDataset(data_path, "train")
     dataset_val = RoadDataset(data_path, "val")
     model = Unet(input_channel=3,class_num=2)
@@ -165,13 +171,14 @@ def prepare_dataloader(dataset: Dataset, batch_size: int):
     )
 
 
-def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_size_train: int,batch_size_val: int,checkpoint_path=None):
-    print(f"Rank: {rank}, World Size: {world_size}, Save Every: {save_every}, Total Epochs: {total_epochs}, Batch Size Train: {batch_size_train}, Batch Size Val: {batch_size_val}")
-    ddp_setup(rank, world_size)
-    dataset_train,dataset_val, model, optimizer = load_train_objs()
-    train_data = prepare_dataloader(dataset_train, batch_size_train)
-    val_data = prepare_dataloader(dataset_val, batch_size_val)
-    trainer = Trainer(model, train_data,val_data, optimizer, rank, save_every,total_epochs)
+def main(rank: int,  config: dict):
+    print(f"Rank: {rank}, World Size: {config['world_size']}, Global bacth size: {config['batch_size_train']*config['world_size']}, Total Epochs: {config['total_epochs']}")
+    set_random_seed(42)  # Set the seed for reproducibility
+    ddp_setup(rank, config['world_size'])
+    dataset_train, dataset_val, model, optimizer = load_train_objs( config['data_path'],config['checkpoint_path'])
+    train_data = prepare_dataloader(dataset_train, config['batch_size_train'])
+    val_data = prepare_dataloader(dataset_val, config['batch_size_val'])
+    trainer = Trainer(model, train_data, val_data, optimizer, rank, config['save_every'], config['total_epochs'])
     trainer.train()
     destroy_process_group()
 
@@ -183,10 +190,13 @@ if __name__ == "__main__":
     # parser.add_argument('save_every', type=int,default=5 help='How often to save a snapshot')
     # parser.add_argument('--batch_size', default=3, type=int, help='Input batch size on each device (default: 32)')
     # args = parser.parse_args()
-    total_epochs=16
-    save_every=5
-    batch_size_train=24
-    batch_size_val=8
-    world_size = torch.cuda.device_count()
-    checkpoint_path =None
-    mp.spawn(main, args=(world_size,save_every, total_epochs,batch_size_train,batch_size_val,checkpoint_path), nprocs=world_size)
+    config = {
+        "data_path": "/ediss_data/ediss6/deepglobe-road-extraction-dataset",
+        "total_epochs": 100,
+        "save_every": 10,
+        "batch_size_train": 25,
+        "batch_size_val": 8,
+        "world_size": torch.cuda.device_count(),
+        "checkpoint_path": None
+    }
+    mp.spawn(main, args=(config,), nprocs=config['world_size'])

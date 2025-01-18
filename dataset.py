@@ -2,15 +2,16 @@ import os
 import matplotlib.pyplot as plt
 import pandas as pd
 from torchvision.io import read_image
-from torchvision.transforms import Grayscale
+from torchvision.transforms import Grayscale,Resize
 import torch
 from torch.utils.data import Dataset, DataLoader
 
 SPLIT= {
-    "train" : (0,4980),
-    "val" : (4980,5603),
-    "test" : (56023,6225),
+    "train" : (0,4980),#80%
+    "val" : (4980,5914),#15%
+    "test" : (5914,6225),#5%
 }
+
 
 class RoadDataset(Dataset):
     def __init__(self, root, split='train'):
@@ -19,6 +20,9 @@ class RoadDataset(Dataset):
         self.meta_data = pd.read_csv(os.path.join(root,"metadata.csv")).dropna() #Use only the data with groundtruch label
         start,end=SPLIT[split]
         self.meta_data=self.meta_data.iloc[start:end]
+        
+        # Add resizing transformation
+        self.resize = Resize((256, 256))
     def __len__(self):
         return len(self.meta_data)
 
@@ -27,12 +31,14 @@ class RoadDataset(Dataset):
         
         img = read_image(os.path.join(self.root,img_metadata.sat_image_path)).float()  
         img = img / 255.0
+        img = self.resize(img)  # Resize to 512x512
 
         mask = read_image(os.path.join(self.root,img_metadata.mask_path)).float()
         grayscale_transform = Grayscale(num_output_channels=1)
         mask = grayscale_transform(mask)
         mask = mask / 255.0
         mask = (mask > 0.5).long() 
+        mask = self.resize(mask)  # Resize to 512x512
 
         return img, mask
     
